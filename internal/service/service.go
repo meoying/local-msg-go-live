@@ -32,7 +32,9 @@ type Service struct {
 	producer sarama.SyncProducer
 }
 
-// 下周三 20:00 继续
+// StartAsyncTask 补偿任务
+// 它不是定时任务
+// 今晚：把它扩展到支持分库分表
 func (svc *Service) StartAsyncTask() error {
 	const limit = 10
 	for {
@@ -60,6 +62,10 @@ func (svc *Service) StartAsyncTask() error {
 				continue
 			}
 		}
+		if len(msgs) == 0 {
+			// 没找到
+			time.Sleep(time.Second)
+		}
 	}
 }
 
@@ -86,6 +92,7 @@ func (svc *Service) ExecTx(ctx context.Context,
 	var msg Msg
 	err := svc.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var err error
+		// 注册成功了
 		msg, err = biz(tx)
 		if err != nil {
 			// 代表的是业务有问题
@@ -94,17 +101,27 @@ func (svc *Service) ExecTx(ctx context.Context,
 		now := time.Now().UnixMilli()
 		msg.Ctime = now
 		msg.Utime = now
+		// 我要把这个 msg 储存好，我要存哪里？
 		return tx.Create(&msg).Error
 	})
 	if err != nil {
 		return err
 	}
+	// 直接发送
 	err = svc.sendMsg(ctx, msg)
 	if err != nil {
 		// 站在业务方讲，它的业务是成功了的
 		// 打印日志，而后不用管了
 		return fmt.Errorf("send msg: %w, cause %w",
 			syncSendMsgError, err)
+	}
+	err = svc.db.WithContext(ctx).Model(&msg).Updates(map[string]interface{}{
+		"status": MsgStatusSuccess,
+		"utime":  time.Now().UnixMilli(),
+	}).Error
+
+	if err != nil {
+		return fmt.Errorf("发送消息成功，但是更新数据库失败 %w", err)
 	}
 	return nil
 }
